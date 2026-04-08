@@ -57,71 +57,81 @@ export function parseVWCSV(file) {
 }
 
 // ── Excel parser for "ÅF Utfall mot mål" (.xlsx) ─────────────────────────────
-// Reads the "Utfall mot mål" sheet and extracts region-level finansgrad data.
+// Returns { period, goals, leveranser, finanskontrakt } using detail sheets.
+//
+// Leveranser sheet   – col 3: region, col 14: Ny/Beg, col 15: Leveransdatum (Date)
+// Finanskontrakt sheet – col 3: region, col 8: Startdatum (Date), col 10: OP/FI, col 14: Ny/Beg
+// Goals come from "Utfall mot mål": vfsMal/opkMal per region × nybeg
 export function parseVWExcel(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
         const data = new Uint8Array(evt.target.result);
-        const wb = XLSX.read(data, { type: 'array' });
+        const wb = XLSX.read(data, { type: 'array', cellDates: true });
 
-        // Prefer "Utfall mot mål" sheet, fall back to first sheet
-        const sheetName =
-          wb.SheetNames.find((n) => n.toLowerCase().includes('utfall')) ||
-          wb.SheetNames[0];
-        const ws = wb.Sheets[sheetName];
-        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+        // ── 1. Period label + goals from "Utfall mot mål" ──────────────────
+        const ovName = wb.SheetNames.find((n) => n.toLowerCase().includes('utfall')) || wb.SheetNames[0];
+        const ovRows = XLSX.utils.sheet_to_json(wb.Sheets[ovName], { header: 1, defval: '' });
 
-        // Extract period label from description cell (row 1, col 0)
-        let periodLabel = 'Okänd period';
-        const desc = String(rows[1]?.[0] || '');
+        let period = 'Okänd period';
+        const desc = String(ovRows[1]?.[0] || '');
         const pm = desc.match(/Period från:\s*(\d+)\s+Period till:\s*(\d+)/);
-        if (pm) periodLabel = `${pm[1]} – ${pm[2]}`;
+        if (pm) period = `${pm[1]} – ${pm[2]}`;
 
-        const toNum = (v) => {
-          const n = Number(v);
-          return isNaN(n) ? 0 : n;
-        };
-
-        const results = [];
+        const goals = {};
         let currentNybeg = null;
-
-        for (const row of rows) {
-          const col1 = String(row[1] || '').trim(); // Ny / Beg
-          const col2 = String(row[2] || '').trim(); // ÅF-grupp
-          const col3 = String(row[3] || '').trim(); // ÅF-region
-          const col4 = String(row[4] || '').trim(); // Återförsäljare
-          const col5 = String(row[5] || '').trim(); // ÅF/Agent-nr
-
-          if (col1 === 'Ny' || col1 === 'Beg') currentNybeg = col1;
-
-          // Region-level row: col3 filled, col2/col4/col5 empty
-          if (currentNybeg && col3 && !col2 && !col4 && !col5) {
-            const total    = toNum(row[6]);   // Antal leveranser
-            const vfsCount = toNum(row[7]);   // Antal finanskontrakt
-            const opkCount = toNum(row[11]);  // Antal kontrakt op.leasing
-            const vfsMal   = toNum(row[10]) * 100; // Mål finansgrad (decimal → %)
-            const opkMal   = toNum(row[14]) * 100; // Mål op.leasing (decimal → %)
-
-            results.push({
-              nybeg:     currentNybeg,
-              region:    col3,
-              period:    periodLabel,
-              total,
-              vfsCount,
-              vfsAmount: toNum(row[8]),
-              vfsGrad:   total ? (vfsCount / total) * 100 : 0,
-              vfsMal,
-              opkCount,
-              opkAmount: 0,
-              opkGrad:   total ? (opkCount / total) * 100 : 0,
-              opkMal,
-            });
+        for (const row of ovRows) {
+          const c1 = String(row[1] || '').trim();
+          const c2 = String(row[2] || '').trim();
+          const c3 = String(row[3] || '').trim();
+          const c4 = String(row[4] || '').trim();
+          const c5 = String(row[5] || '').trim();
+          if (c1 === 'Ny' || c1 === 'Beg') currentNybeg = c1;
+          if (currentNybeg && c3 && !c2 && !c4 && !c5) {
+            goals[`${currentNybeg}|${c3}`] = {
+              vfsMal: Number(row[10]) * 100,
+              opkMal: Number(row[14]) * 100,
+            };
           }
         }
 
-        resolve(results);
+        // ── 2. Leveranser (individual deliveries) ──────────────────────────
+        // Headers row 4 (index 4), data from row 5 (index 5)
+        const levSheet = wb.Sheets['Leveranser'];
+        const levRows = levSheet
+          ? XLSX.utils.sheet_to_json(levSheet, { header: 1, defval: '', cellDates: true })
+          : [];
+        const leveranser = [];
+        for (let i = 5; i < levRows.length; i++) {
+          const row = levRows[i];
+          if (!row[1]) continue;                      // ÅF nummer empty → skip
+          const region = String(row[3] || '').trim();
+          const nybeg  = String(row[14] || '').trim();
+          const datum  = row[15];                     // Leveransdatum (Date)
+          if (!region || !(datum instanceof Date)) continue;
+          leveranser.push({ region, nybeg, datum });
+        }
+
+        // ── 3. Finanskontrakt (individual finance contracts) ───────────────
+        // Headers row 4, data from row 5
+        const finSheet = wb.Sheets['Finanskontrakt'];
+        const finRows = finSheet
+          ? XLSX.utils.sheet_to_json(finSheet, { header: 1, defval: '', cellDates: true })
+          : [];
+        const finanskontrakt = [];
+        for (let i = 5; i < finRows.length; i++) {
+          const row = finRows[i];
+          if (!row[1]) continue;
+          const region = String(row[3]  || '').trim();
+          const datum  = row[8];                      // Startdatum (Date)
+          const opFi   = String(row[10] || '').trim(); // 'OP' | 'Lån' | 'FI' | …
+          const nybeg  = String(row[14] || '').trim();
+          if (!region || !(datum instanceof Date)) continue;
+          finanskontrakt.push({ region, nybeg, datum, opFi });
+        }
+
+        resolve({ period, goals, leveranser, finanskontrakt });
       } catch (err) {
         reject(err);
       }
