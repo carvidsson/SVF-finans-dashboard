@@ -1,7 +1,7 @@
 import React, { useState, useRef, useMemo } from 'react';
-import { Bar } from 'react-chartjs-2';
+import { Bar, Doughnut } from 'react-chartjs-2';
 import { useData } from '../../context/DataContext';
-import { parseVWCSV, processVWData } from '../../utils/csvParser';
+import { parseVWExcel } from '../../utils/csvParser';
 import { fmtNum } from '../../utils/formatters';
 
 // ── Date preset helpers (same logic as DateBar) ──────────────────────────────
@@ -58,7 +58,7 @@ function KPI({ label, value, sub }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function Finansgrad() {
-  const { rawData } = useData();
+  const { rawData, filters } = useData();
   const fileRef = useRef();
 
   // VW Finance state
@@ -75,15 +75,18 @@ export default function Finansgrad() {
   const handleFile = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const rows = await parseVWCSV(file);
-    const parsed = processVWData(rows);
-    if (!parsed.length) {
-      alert('Kunde inte läsa data ur filen. Kontrollera att det är rätt format (ÅF Utfall mot mål).');
-      return;
+    try {
+      const parsed = await parseVWExcel(file);
+      if (!parsed.length) {
+        alert('Kunde inte läsa data ur filen. Kontrollera att det är rätt format (ÅF Utfall mot mål .xlsx).');
+        return;
+      }
+      setVwData(parsed);
+      setReportName(file.name);
+      setSelectedPeriod('');
+    } catch (err) {
+      alert('Fel vid inläsning av Excel-filen: ' + err.message);
     }
-    setVwData(parsed);
-    setReportName(file.name);
-    setSelectedPeriod('');   // reset to "all" on new file
     e.target.value = '';
   };
 
@@ -199,6 +202,30 @@ export default function Finansgrad() {
     return { total, active: active.length, ny, beg, totalFin, uniqueCust };
   }, [filteredStock]);
 
+  // ── Finansbolagsfördelning från stockrapporten (Leverantörsnamn) ──
+  const stockFinansbolag = useMemo(() => {
+    if (!filteredStock.length) return null;
+    const byCompany = {};
+    filteredStock.forEach((r) => {
+      const name = r['Leverantörsnamn'] || 'Okänt';
+      byCompany[name] = (byCompany[name] || 0) + 1;
+    });
+    const sorted = Object.entries(byCompany).sort((a, b) => b[1] - a[1]);
+    return sorted;
+  }, [filteredStock]);
+
+  const stockFinansbolagNyBeg = useMemo(() => {
+    if (!filteredStock.length) return null;
+    const ny  = {}, beg = {};
+    filteredStock.forEach((r) => {
+      const name = r['Leverantörsnamn'] || 'Okänt';
+      const isNy = r['Begagnat'] === 'No';
+      const bucket = isNy ? ny : beg;
+      bucket[name] = (bucket[name] || 0) + 1;
+    });
+    return { ny, beg };
+  }, [filteredStock]);
+
   // ── Upload screen ──
   if (!vwData.length) {
     return (
@@ -207,10 +234,10 @@ export default function Finansgrad() {
           <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
           <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
         </svg>
-        <p><strong>Ladda upp Volkswagen Finans CSV</strong></p>
-        <p style={{ fontSize: '.85em', color: '#999' }}>Rapporten "ÅF Utfall mot mål" från VW Finance-portalen</p>
-        <input ref={fileRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleFile} />
-        <button className="vw-upload-btn-large" onClick={() => fileRef.current.click()}>Välj VW Finans CSV…</button>
+        <p><strong>Ladda upp Volkswagen Finans Excel-rapport</strong></p>
+        <p style={{ fontSize: '.85em', color: '#999' }}>Rapporten "ÅF Utfall mot mål" (.xlsx) från VW Finance-portalen</p>
+        <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={handleFile} />
+        <button className="vw-upload-btn-large" onClick={() => fileRef.current.click()}>Välj ÅF Utfall mot mål (.xlsx)…</button>
       </div>
     );
   }
@@ -220,13 +247,13 @@ export default function Finansgrad() {
 
   return (
     <div>
-      <input ref={fileRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleFile} />
+      <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: 'none' }} onChange={handleFile} />
 
       {/* ── Info bar ── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 24, padding: '10px 20px', background: '#f5f7fa', borderBottom: '1px solid #e8ecf0', fontSize: '.85em', color: '#555', flexWrap: 'wrap' }}>
         <span><strong>VW Finans rapport:</strong> <span style={{ color: '#0f3460' }}>{reportName}</span></span>
         <span><strong>Stockrapport datum:</strong> <span style={{ color: '#0f3460' }}>{rangeLabel(stockPreset, stockFrom, stockTo)}</span></span>
-        <button className="filter-clear-btn" style={{ marginLeft: 'auto', padding: '4px 12px', fontSize: '.8em' }} onClick={() => fileRef.current.click()}>Ladda ny VW CSV</button>
+        <button className="filter-clear-btn" style={{ marginLeft: 'auto', padding: '4px 12px', fontSize: '.8em' }} onClick={() => fileRef.current.click()}>Ladda ny Excel-rapport</button>
       </div>
 
       {/* ── Period controls ── */}
@@ -347,6 +374,110 @@ export default function Finansgrad() {
         </div>
       </div>
 
+      {/* ── Finansbolagsfördelning från stockrapporten ── */}
+      {stockFinansbolag && stockFinansbolag.length > 0 && (
+        <div className="section">
+          <h2>
+            Finansbolagsfördelning — Stockrapporten
+            <span style={{ fontWeight: 400, fontSize: '.85em', color: '#888', marginLeft: 8 }}>
+              {rangeLabel(stockPreset, stockFrom, stockTo)}
+            </span>
+          </h2>
+          <div style={{ fontSize: '.82em', color: '#888', marginBottom: 12 }}>
+            Visar aktiva finanskontrakt (personbilar) per finansbolag från stockrapporten under vald period. Används för att jämföra vikten av olika finansbolag mot VW Finans-rapporten.
+          </div>
+          <div className="chart-row">
+            <div className="chart-box" style={{ maxWidth: 420 }}>
+              <Doughnut
+                data={{
+                  labels: stockFinansbolag.map(([name]) => name),
+                  datasets: [{
+                    data: stockFinansbolag.map(([, count]) => count),
+                    backgroundColor: ['#4472C4','#70AD47','#ED7D31','#FFC000','#A9C4E8','#C5E0B4','#FF7F7F','#9E480E','#636363','#997300'],
+                    borderWidth: 1,
+                  }],
+                }}
+                options={{
+                  responsive: true,
+                  plugins: {
+                    title: { display: true, text: 'Alla kontrakt per finansbolag', font: { size: 13 } },
+                    legend: { position: 'right' },
+                    tooltip: {
+                      callbacks: {
+                        label: (ctx) => {
+                          const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
+                          return ` ${ctx.label}: ${ctx.raw} (${((ctx.raw / total) * 100).toFixed(1)}%)`;
+                        },
+                      },
+                    },
+                  },
+                }}
+              />
+            </div>
+            {stockFinansbolagNyBeg && (
+              <div className="chart-box">
+                <Bar
+                  data={{
+                    labels: stockFinansbolag.map(([name]) => name),
+                    datasets: [
+                      {
+                        label: 'Nya fordon',
+                        data: stockFinansbolag.map(([name]) => stockFinansbolagNyBeg.ny[name] || 0),
+                        backgroundColor: '#4472C4',
+                        borderRadius: 4,
+                      },
+                      {
+                        label: 'Begagnade fordon',
+                        data: stockFinansbolag.map(([name]) => stockFinansbolagNyBeg.beg[name] || 0),
+                        backgroundColor: '#A9C4E8',
+                        borderRadius: 4,
+                      },
+                    ],
+                  }}
+                  options={{
+                    responsive: true,
+                    plugins: {
+                      title: { display: true, text: 'Kontrakt per finansbolag (Ny / Beg)', font: { size: 13 } },
+                      legend: { position: 'bottom' },
+                    },
+                    scales: { x: { stacked: true }, y: { stacked: true } },
+                  }}
+                />
+              </div>
+            )}
+          </div>
+          <div className="table-scroll" style={{ marginTop: 16 }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Finansbolag</th>
+                  <th style={{ textAlign: 'right' }}>Totalt</th>
+                  <th style={{ textAlign: 'right' }}>Andel</th>
+                  <th style={{ textAlign: 'right' }}>Nya</th>
+                  <th style={{ textAlign: 'right' }}>Begagnade</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stockFinansbolag.map(([name, count]) => {
+                  const total = stockFinansbolag.reduce((s, [, c]) => s + c, 0);
+                  const nyCount  = stockFinansbolagNyBeg?.ny[name]  || 0;
+                  const begCount = stockFinansbolagNyBeg?.beg[name] || 0;
+                  return (
+                    <tr key={name}>
+                      <td><strong>{name}</strong></td>
+                      <td style={{ textAlign: 'right' }}>{count}</td>
+                      <td style={{ textAlign: 'right' }}>{((count / total) * 100).toFixed(1)}%</td>
+                      <td style={{ textAlign: 'right' }}>{nyCount}</td>
+                      <td style={{ textAlign: 'right' }}>{begCount}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* ── Region table ── */}
       <div className="section">
         <h2>
@@ -390,7 +521,7 @@ export default function Finansgrad() {
       </div>
 
       <div style={{ textAlign: 'center', marginTop: 4, marginBottom: 20 }}>
-        <button className="filter-clear-btn" onClick={() => fileRef.current.click()}>Ladda ny VW CSV</button>
+        <button className="filter-clear-btn" onClick={() => fileRef.current.click()}>Ladda ny Excel-rapport</button>
       </div>
     </div>
   );

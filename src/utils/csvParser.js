@@ -1,4 +1,5 @@
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 
 export function parseStockCSV(file) {
   return new Promise((resolve, reject) => {
@@ -52,6 +53,81 @@ export function parseVWCSV(file) {
     };
     reader.onerror = reject;
     reader.readAsText(file, 'utf-8');
+  });
+}
+
+// ── Excel parser for "ÅF Utfall mot mål" (.xlsx) ─────────────────────────────
+// Reads the "Utfall mot mål" sheet and extracts region-level finansgrad data.
+export function parseVWExcel(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: 'array' });
+
+        // Prefer "Utfall mot mål" sheet, fall back to first sheet
+        const sheetName =
+          wb.SheetNames.find((n) => n.toLowerCase().includes('utfall')) ||
+          wb.SheetNames[0];
+        const ws = wb.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+
+        // Extract period label from description cell (row 1, col 0)
+        let periodLabel = 'Okänd period';
+        const desc = String(rows[1]?.[0] || '');
+        const pm = desc.match(/Period från:\s*(\d+)\s+Period till:\s*(\d+)/);
+        if (pm) periodLabel = `${pm[1]} – ${pm[2]}`;
+
+        const toNum = (v) => {
+          const n = Number(v);
+          return isNaN(n) ? 0 : n;
+        };
+
+        const results = [];
+        let currentNybeg = null;
+
+        for (const row of rows) {
+          const col1 = String(row[1] || '').trim(); // Ny / Beg
+          const col2 = String(row[2] || '').trim(); // ÅF-grupp
+          const col3 = String(row[3] || '').trim(); // ÅF-region
+          const col4 = String(row[4] || '').trim(); // Återförsäljare
+          const col5 = String(row[5] || '').trim(); // ÅF/Agent-nr
+
+          if (col1 === 'Ny' || col1 === 'Beg') currentNybeg = col1;
+
+          // Region-level row: col3 filled, col2/col4/col5 empty
+          if (currentNybeg && col3 && !col2 && !col4 && !col5) {
+            const total    = toNum(row[6]);   // Antal leveranser
+            const vfsCount = toNum(row[7]);   // Antal finanskontrakt
+            const opkCount = toNum(row[11]);  // Antal kontrakt op.leasing
+            const vfsMal   = toNum(row[10]) * 100; // Mål finansgrad (decimal → %)
+            const opkMal   = toNum(row[14]) * 100; // Mål op.leasing (decimal → %)
+
+            results.push({
+              nybeg:     currentNybeg,
+              region:    col3,
+              period:    periodLabel,
+              total,
+              vfsCount,
+              vfsAmount: toNum(row[8]),
+              vfsGrad:   total ? (vfsCount / total) * 100 : 0,
+              vfsMal,
+              opkCount,
+              opkAmount: 0,
+              opkGrad:   total ? (opkCount / total) * 100 : 0,
+              opkMal,
+            });
+          }
+        }
+
+        resolve(results);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
   });
 }
 
