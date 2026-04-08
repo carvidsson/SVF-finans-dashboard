@@ -14,8 +14,27 @@ function ChartBox({ title, children }) {
 }
 
 export default function Overview() {
-  const { filteredData, filters } = useData();
+  const { filteredData, rawData, filters } = useData();
   const selectedDealers = filters.dealers;
+
+  // All-status data for repurchase (respects other filters but ignores status filter)
+  const repurchaseBase = useMemo(() => {
+    const { dealers, sellers, custType, dateFrom, dateTo } = filters;
+    const df = dateFrom ? new Date(dateFrom) : null;
+    const dt = dateTo ? new Date(dateTo + 'T23:59:59') : null;
+    return rawData.filter((r) => {
+      if (dealers.length && !dealers.includes(r['Leverantörsnamn'])) return false;
+      if (sellers.length && !sellers.includes(r['Case-ägare'])) return false;
+      if (custType !== 'all' && r['Kundtyp'] !== custType) return false;
+      if (df || dt) {
+        const start = r['Start Datum'];
+        if (!start || isNaN(start)) return false;
+        if (df && start < df) return false;
+        if (dt && start > dt) return false;
+      }
+      return true;
+    });
+  }, [rawData, filters]);
 
   // Growth
   const growthData = useMemo(() => {
@@ -86,33 +105,44 @@ export default function Overview() {
     return lpc;
   }, [filteredData]);
 
-  // Repurchase
+  // Repurchase — uses all-status data to find customers with terminated + subsequent active contract
   const repurchase = useMemo(() => {
-    const terminated = {};
-    filteredData
-      .filter((r) => r['Status kontraktsrad'] === 'Terminated')
-      .forEach((r) => {
-        if (!r['Kund']) return;
-        if (!terminated[r['Kund']]) terminated[r['Kund']] = [];
-        terminated[r['Kund']].push(r['Slutdatum']);
-      });
-    const allStarts = {};
-    filteredData.forEach((r) => {
-      if (!r['Kund']) return;
-      if (!allStarts[r['Kund']]) allStarts[r['Kund']] = [];
-      allStarts[r['Kund']].push(r['Start Datum']);
-    });
-    let repeatCount = 0;
-    const eligible = Object.keys(terminated).length;
-    for (const c of Object.keys(terminated)) {
-      const termDates = terminated[c].filter((d) => d && !isNaN(d));
-      const starts = (allStarts[c] || []).filter((d) => d && !isNaN(d));
-      for (const td of termDates) {
-        if (starts.some((s) => s > td)) { repeatCount++; break; }
+    const calcGroup = (rows) => {
+      // Map customer ID → their terminated contract end dates
+      const terminated = {};
+      rows
+        .filter((r) => r['Status kontraktsrad'] === 'Terminated')
+        .forEach((r) => {
+          if (!r['Kund']) return;
+          if (!terminated[r['Kund']]) terminated[r['Kund']] = [];
+          terminated[r['Kund']].push(r['Slutdatum']);
+        });
+      // Map customer ID → active contract start dates
+      const activeStarts = {};
+      rows
+        .filter((r) => r['Status kontraktsrad'] === 'Active')
+        .forEach((r) => {
+          if (!r['Kund']) return;
+          if (!activeStarts[r['Kund']]) activeStarts[r['Kund']] = [];
+          activeStarts[r['Kund']].push(r['Start Datum']);
+        });
+      let repeat = 0;
+      const eligible = Object.keys(terminated).length;
+      for (const cust of Object.keys(terminated)) {
+        const termDates = terminated[cust].filter((d) => d && !isNaN(d));
+        const starts = (activeStarts[cust] || []).filter((d) => d && !isNaN(d));
+        for (const td of termDates) {
+          if (starts.some((s) => s > td)) { repeat++; break; }
+        }
       }
-    }
-    return { repeat: repeatCount, eligible };
-  }, [filteredData]);
+      return { repeat, eligible, noRepeat: eligible - repeat };
+    };
+
+    return {
+      privat: calcGroup(repurchaseBase.filter((r) => r['Kundtyp'] === 'Privat')),
+      foretag: calcGroup(repurchaseBase.filter((r) => r['Kundtyp'] === 'Näringsidkare')),
+    };
+  }, [repurchaseBase]);
 
   // Dealer comparison
   const dealerComparison = useMemo(() => {
@@ -243,13 +273,54 @@ export default function Overview() {
           />
         </ChartBox>
         <ChartBox title="Återköpsgrad">
-          <Doughnut
-            data={{
-              labels: ['Återköp', 'Inget återköp'],
-              datasets: [{ data: [repurchase.repeat, repurchase.eligible - repurchase.repeat], backgroundColor: [ACCENT, '#e0e0e0'] }],
-            }}
-            options={doughnutOpts}
-          />
+          {repurchase.privat.eligible === 0 && repurchase.foretag.eligible === 0 ? (
+            <p style={{ color: '#999', fontSize: '.9em', textAlign: 'center', paddingTop: 16 }}>
+              Ingen data — avslutade kontrakt saknas i valt filter
+            </p>
+          ) : (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-around', gap: 8 }}>
+                {repurchase.privat.eligible > 0 && (
+                  <div style={{ flex: 1, textAlign: 'center' }}>
+                    <div style={{ fontSize: '.75em', fontWeight: 600, marginBottom: 4, color: '#555' }}>
+                      Privat (personnr)
+                    </div>
+                    <Doughnut
+                      data={{
+                        labels: ['Återköp', 'Ej återköp'],
+                        datasets: [{ data: [repurchase.privat.repeat, repurchase.privat.noRepeat], backgroundColor: [ACCENT, '#e0e0e0'] }],
+                      }}
+                      options={{ ...doughnutOpts, plugins: { ...doughnutOpts.plugins, legend: { position: 'bottom', labels: { font: { size: 10 } } } } }}
+                    />
+                    <div style={{ fontSize: '.8em', color: '#333', marginTop: 4 }}>
+                      {repurchase.privat.eligible > 0
+                        ? `${Math.round((repurchase.privat.repeat / repurchase.privat.eligible) * 100)}% (${repurchase.privat.repeat}/${repurchase.privat.eligible})`
+                        : '–'}
+                    </div>
+                  </div>
+                )}
+                {repurchase.foretag.eligible > 0 && (
+                  <div style={{ flex: 1, textAlign: 'center' }}>
+                    <div style={{ fontSize: '.75em', fontWeight: 600, marginBottom: 4, color: '#555' }}>
+                      Företag (org.nr)
+                    </div>
+                    <Doughnut
+                      data={{
+                        labels: ['Återköp', 'Ej återköp'],
+                        datasets: [{ data: [repurchase.foretag.repeat, repurchase.foretag.noRepeat], backgroundColor: [TEAL, '#e0e0e0'] }],
+                      }}
+                      options={{ ...doughnutOpts, plugins: { ...doughnutOpts.plugins, legend: { position: 'bottom', labels: { font: { size: 10 } } } } }}
+                    />
+                    <div style={{ fontSize: '.8em', color: '#333', marginTop: 4 }}>
+                      {repurchase.foretag.eligible > 0
+                        ? `${Math.round((repurchase.foretag.repeat / repurchase.foretag.eligible) * 100)}% (${repurchase.foretag.repeat}/${repurchase.foretag.eligible})`
+                        : '–'}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </ChartBox>
       </div>
     </div>
