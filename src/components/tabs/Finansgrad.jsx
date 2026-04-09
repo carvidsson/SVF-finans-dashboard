@@ -44,7 +44,13 @@ function rangeLabel(preset, from, to) {
   return `${fmt(f)} – ${fmt(t || new Date().toISOString().split('T')[0])}`;
 }
 
-// ── DateFilter sub-component (reusable preset picker) ────────────────────────
+function fmtMkr(v) {
+  if (!v) return '0 kr';
+  if (Math.abs(v) >= 1e6) return (v / 1e6).toLocaleString('sv-SE', { maximumFractionDigits: 1 }) + ' Mkr';
+  return v.toLocaleString('sv-SE', { maximumFractionDigits: 0 }) + ' kr';
+}
+
+// ── DateFilter sub-component ─────────────────────────────────────────────────
 function DateFilter({ label, hint, preset, from, to, onPreset, onFrom, onTo }) {
   return (
     <div className="filter-group">
@@ -76,9 +82,9 @@ function DateFilter({ label, hint, preset, from, to, onPreset, onFrom, onTo }) {
 }
 
 // ── KPI sub-component ─────────────────────────────────────────────────────────
-function KPI({ label, value, sub }) {
+function KPI({ label, value, sub, highlight }) {
   return (
-    <div className="kpi">
+    <div className="kpi" style={highlight ? { borderLeft: '3px solid #4472C4' } : {}}>
       <div className="label">{label}</div>
       <div className="value">{value}</div>
       {sub && <div className="sub">{sub}</div>}
@@ -86,21 +92,24 @@ function KPI({ label, value, sub }) {
   );
 }
 
+const pct = (n, d) => (d ? (n / d) * 100 : 0);
+const f1  = (v) => v.toFixed(1) + '%';
+const COLORS = ['#4472C4','#70AD47','#ED7D31','#FFC000','#A9C4E8','#C5E0B4','#FF7F7F','#9E480E','#636363','#997300'];
+
 // ── Main component ────────────────────────────────────────────────────────────
 export default function Finansgrad() {
   const { rawData } = useData();
   const fileRef = useRef();
 
-  // VW Finance Excel state
-  const [vwExcelData, setVwExcelData] = useState(null); // { period, goals, leveranser, finanskontrakt }
+  const [vwExcelData, setVwExcelData] = useState(null);
   const [reportName, setReportName]   = useState('—');
 
-  // VW Finance date filter (based on Leveransdatum / Startdatum from Excel)
+  // VW Finance date filter
   const [vwPreset, setVwPreset] = useState('all');
   const [vwFrom,   setVwFrom]   = useState('');
   const [vwTo,     setVwTo]     = useState('');
 
-  // Stockrapporten date filter (based on Start Datum in CSV)
+  // Stockrapporten date filter
   const [stockPreset, setStockPreset] = useState('all');
   const [stockFrom,   setStockFrom]   = useState('');
   const [stockTo,     setStockTo]     = useState('');
@@ -172,21 +181,22 @@ export default function Finansgrad() {
   }, [vwExcelData, vwFrom, vwTo]);
 
   // ── VW Finance analytics ─────────────────────────────────────────────────
-  const pct = (n, d) => (d ? (n / d) * 100 : 0);
-  const f1  = (v) => v.toFixed(1) + '%';
-
   const vwAnalytics = useMemo(() => {
     if (!vwExcelData) return null;
     const goals = vwExcelData.goals;
 
-    // Accumulate per region × nybeg
     const byKey = {};
     const getOrCreate = (nybeg, region) => {
       const key = `${nybeg}|${region}`;
       if (!byKey[key]) {
         const g = goals[key] || {};
-        byKey[key] = { nybeg, region, total: 0, vfsCount: 0, opkCount: 0,
-          vfsMal: g.vfsMal || 0, opkMal: g.opkMal || 0 };
+        byKey[key] = {
+          nybeg, region,
+          total: 0,
+          vfsCount: 0, opkCount: 0, serviceCount: 0,
+          belopp: 0,
+          vfsMal: g.vfsMal || 0, opkMal: g.opkMal || 0,
+        };
       }
       return byKey[key];
     };
@@ -199,26 +209,31 @@ export default function Finansgrad() {
     filteredFinanskontrakt.forEach((r) => {
       if (r.nybeg !== 'Ny' && r.nybeg !== 'Beg') return;
       const d = getOrCreate(r.nybeg, r.region);
-      d.vfsCount++;                          // all are VFS (VW Finance portal)
-      if (r.opFi === 'OP') d.opkCount++;    // operational leasing subset
+      d.vfsCount++;
+      d.belopp += r.belopp || 0;
+      if (r.opFi === 'OP' || r.opFi.startsWith('OPER')) d.opkCount++;
+      if (r.service) d.serviceCount++;
     });
 
-    // Region order: sorted, from leveranser
-    const regionOrder = [...new Set(filteredLeveranser
-      .filter((r) => r.nybeg === 'Ny' || r.nybeg === 'Beg')
-      .map((r) => r.region)
+    const regionOrder = [...new Set(
+      filteredLeveranser
+        .filter((r) => r.nybeg === 'Ny' || r.nybeg === 'Beg')
+        .map((r) => r.region)
     )].sort();
 
-    // Totals
-    let nyTot = 0, nyVfsC = 0, nyOpkC = 0, nyVfsMalSum = 0, nyOpkMalSum = 0, nyRgnCount = 0;
-    let begTot = 0, begVfsC = 0, begOpkC = 0, begVfsMalSum = 0, begOpkMalSum = 0, begRgnCount = 0;
+    let nyTot = 0, nyVfsC = 0, nyOpkC = 0, nySvcC = 0, nyBelopp = 0;
+    let nyVfsMalSum = 0, nyOpkMalSum = 0, nyRgnCount = 0;
+    let begTot = 0, begVfsC = 0, begOpkC = 0, begSvcC = 0, begBelopp = 0;
+    let begVfsMalSum = 0, begOpkMalSum = 0, begRgnCount = 0;
 
     Object.values(byKey).forEach((d) => {
       if (d.nybeg === 'Ny') {
         nyTot += d.total; nyVfsC += d.vfsCount; nyOpkC += d.opkCount;
+        nySvcC += d.serviceCount; nyBelopp += d.belopp;
         nyVfsMalSum += d.vfsMal; nyOpkMalSum += d.opkMal; nyRgnCount++;
       } else {
         begTot += d.total; begVfsC += d.vfsCount; begOpkC += d.opkCount;
+        begSvcC += d.serviceCount; begBelopp += d.belopp;
         begVfsMalSum += d.vfsMal; begOpkMalSum += d.opkMal; begRgnCount++;
       }
     });
@@ -228,41 +243,21 @@ export default function Finansgrad() {
     const avgBegVfsMal = begRgnCount ? begVfsMalSum / begRgnCount : 0;
     const avgBegOpkMal = begRgnCount ? begOpkMalSum / begRgnCount : 0;
 
-    const labels = [...regionOrder, 'Total'];
-
-    const getVal = (nb, r, field) => {
-      if (r === 'Total') {
-        const tot = nb === 'Ny' ? nyTot  : begTot;
-        const vC  = nb === 'Ny' ? nyVfsC : begVfsC;
-        const oC  = nb === 'Ny' ? nyOpkC : begOpkC;
-        const vM  = nb === 'Ny' ? avgNyVfsMal  : avgBegVfsMal;
-        const oM  = nb === 'Ny' ? avgNyOpkMal  : avgBegOpkMal;
-        if (field === 'vfsGrad')  return pct(vC, tot);
-        if (field === 'opkGrad')  return pct(oC, tot);
-        if (field === 'vfsMal')   return vM;
-        if (field === 'opkMal')   return oM;
-        if (field === 'vfsCount') return vC;
-        if (field === 'opkCount') return oC;
-        return tot;
-      }
-      const d = byKey[`${nb}|${r}`];
-      if (!d) return 0;
-      if (field === 'vfsGrad') return pct(d.vfsCount, d.total);
-      if (field === 'opkGrad') return pct(d.opkCount, d.total);
-      return d[field] || 0;
+    return {
+      byKey, regionOrder,
+      nyTot, nyVfsC, nyOpkC, nySvcC, nyBelopp,
+      begTot, begVfsC, begOpkC, begSvcC, begBelopp,
+      avgNyVfsMal, avgNyOpkMal, avgBegVfsMal, avgBegOpkMal,
+      hasService: filteredFinanskontrakt.some((r) => r.service),
+      hasBelopp:  filteredFinanskontrakt.some((r) => r.belopp > 0),
     };
-
-    return { labels, getVal, regionOrder, byKey,
-      nyTot, nyVfsC, nyOpkC, begTot, begVfsC, begOpkC,
-      avgNyVfsMal, avgNyOpkMal, avgBegVfsMal, avgBegOpkMal };
   }, [filteredLeveranser, filteredFinanskontrakt, vwExcelData]);
 
-  // ── Filtered stockrapporten (by Start Datum) ─────────────────────────────
+  // ── Filtered stockrapporten ──────────────────────────────────────────────
   const filteredStock = useMemo(() => {
     if (!rawData.length) return [];
     const df = stockFrom ? new Date(stockFrom) : null;
     const dt = stockTo   ? new Date(stockTo + 'T23:59:59') : null;
-    // Only personbilar (Objektsgrupp = Personbil) and active contracts
     return rawData.filter((r) => {
       if (df || dt) {
         const start = r['Start Datum'];
@@ -280,21 +275,15 @@ export default function Finansgrad() {
     const byCompany = {};
     filteredStock.forEach((r) => {
       const name = r['Leverantörsnamn'] || 'Okänt';
-      byCompany[name] = (byCompany[name] || 0) + 1;
+      if (!byCompany[name]) byCompany[name] = { count: 0, ny: 0, beg: 0, belopp: 0 };
+      byCompany[name].count++;
+      byCompany[name].belopp += r['Finansierat Belopp'] || 0;
+      if (r['Begagnat'] === 'No') byCompany[name].ny++;
+      else byCompany[name].beg++;
     });
-    return Object.entries(byCompany).sort((a, b) => b[1] - a[1]);
-  }, [filteredStock]);
-
-  const stockFinansbolagNyBeg = useMemo(() => {
-    if (!filteredStock.length) return null;
-    const ny = {}, beg = {};
-    filteredStock.forEach((r) => {
-      const name  = r['Leverantörsnamn'] || 'Okänt';
-      // Begagnat = 'Yes' → begagnad, 'No' → ny
-      const bucket = r['Begagnat'] === 'No' ? ny : beg;
-      bucket[name] = (bucket[name] || 0) + 1;
-    });
-    return { ny, beg };
+    return Object.entries(byCompany)
+      .sort((a, b) => b[1].count - a[1].count)
+      .map(([name, v]) => ({ name, ...v }));
   }, [filteredStock]);
 
   // ── Stock summary ────────────────────────────────────────────────────────
@@ -324,9 +313,27 @@ export default function Finansgrad() {
     );
   }
 
-  const { labels, getVal, regionOrder, byKey } = vwAnalytics;
+  const { byKey, regionOrder,
+    nyTot, nyVfsC, nyOpkC, nySvcC, nyBelopp,
+    begTot, begVfsC, begOpkC, begSvcC, begBelopp,
+    avgNyVfsMal, avgNyOpkMal, avgBegVfsMal, avgBegOpkMal,
+    hasService, hasBelopp,
+  } = vwAnalytics;
+
   const tickPct = { ticks: { callback: (v) => v.toFixed(0) + '%' } };
-  const DOUGHNUT_COLORS = ['#4472C4','#70AD47','#ED7D31','#FFC000','#A9C4E8','#C5E0B4','#FF7F7F','#9E480E','#636363','#997300'];
+  const regLabels = [...regionOrder, 'Total'];
+
+  const getByKey = (nb, r) => byKey[`${nb}|${r}`] || {};
+  const getTotal = (nb) => nb === 'Ny'
+    ? { total: nyTot, vfsCount: nyVfsC, opkCount: nyOpkC, vfsMal: avgNyVfsMal, opkMal: avgNyOpkMal }
+    : { total: begTot, vfsCount: begVfsC, opkCount: begOpkC, vfsMal: avgBegVfsMal, opkMal: avgBegOpkMal };
+
+  const getField = (nb, r, field) => {
+    const d = r === 'Total' ? getTotal(nb) : getByKey(nb, r);
+    if (field === 'vfsGrad') return pct(d.vfsCount || 0, d.total || 0);
+    if (field === 'opkGrad') return pct(d.opkCount || 0, d.total || 0);
+    return d[field] || 0;
+  };
 
   return (
     <div>
@@ -336,8 +343,8 @@ export default function Finansgrad() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 24, padding: '10px 20px', background: '#f5f7fa', borderBottom: '1px solid #e8ecf0', fontSize: '.85em', color: '#555', flexWrap: 'wrap' }}>
         <span><strong>VW Finans rapport:</strong> <span style={{ color: '#0f3460' }}>{reportName}</span></span>
         <span><strong>Rapportens period:</strong> <span style={{ color: '#0f3460' }}>{vwExcelData.period}</span></span>
-        <span><strong>Leveranser:</strong> {filteredLeveranser.length} st</span>
-        <span><strong>Finanskontrakt:</strong> {filteredFinanskontrakt.length} st</span>
+        <span><strong>Leveranser (totalt i fil):</strong> {vwExcelData.leveranser.length} st</span>
+        <span><strong>VFS kontrakt (totalt i fil):</strong> {vwExcelData.finanskontrakt.length} st</span>
         <button className="filter-clear-btn" style={{ marginLeft: 'auto', padding: '4px 12px', fontSize: '.8em' }} onClick={() => fileRef.current.click()}>Ladda ny Excel-rapport</button>
       </div>
 
@@ -346,7 +353,7 @@ export default function Finansgrad() {
         <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <DateFilter
             label="VW Finans — Leverans-/kontraktsperiod"
-            hint="Filtrerar Leveransdatum (leveranser) och Startdatum (finanskontrakt) i Excel-filen"
+            hint="Filtrerar Leveransdatum (leveranser) och Startdatum (finanskontrakt)"
             preset={vwPreset} from={vwFrom} to={vwTo}
             onPreset={handleVwPreset} onFrom={setVwFrom} onTo={setVwTo}
           />
@@ -359,52 +366,172 @@ export default function Finansgrad() {
         </div>
       </div>
 
-      {/* ── VW Finance KPIs ── */}
+      {/* ── VW Finance section header ── */}
       <div style={{ fontSize: '.78em', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.5px', color: '#888', marginBottom: 8, paddingLeft: 4 }}>
         VW Finans — {rangeLabel(vwPreset, vwFrom, vwTo)}
       </div>
+
+      {/* ── KPI grid — Ny ── */}
+      <div style={{ fontSize: '.72em', fontWeight: 700, textTransform: 'uppercase', color: '#4472C4', letterSpacing: '.4px', marginBottom: 4, paddingLeft: 2 }}>Ny</div>
+      <div className="kpi-grid" style={{ marginBottom: 8 }}>
+        <KPI label="Levererade" value={nyTot.toLocaleString('sv-SE')} highlight />
+        <KPI label="VFS Finanskontrakt" value={nyVfsC.toLocaleString('sv-SE')} sub={f1(pct(nyVfsC, nyTot)) + ' finansgrad'} highlight />
+        <KPI label="VFS Mål" value={f1(avgNyVfsMal)} />
+        <KPI label="Op.leasing" value={nyOpkC.toLocaleString('sv-SE')} sub={f1(pct(nyOpkC, nyTot)) + ' av lev.'} />
+        <KPI label="Op.leasing Mål" value={f1(avgNyOpkMal)} />
+        {hasService && <KPI label="Serviceavtal" value={nySvcC.toLocaleString('sv-SE')} sub={f1(pct(nySvcC, nyVfsC)) + ' av VFS'} />}
+        {hasBelopp && <KPI label="Finansierat belopp" value={fmtMkr(nyBelopp)} />}
+      </div>
+
+      {/* ── KPI grid — Beg ── */}
+      <div style={{ fontSize: '.72em', fontWeight: 700, textTransform: 'uppercase', color: '#A9C4E8', letterSpacing: '.4px', marginBottom: 4, paddingLeft: 2 }}>Begagnat</div>
       <div className="kpi-grid" style={{ marginBottom: 20 }}>
-        <KPI label="Ny — Levererade"        value={vwAnalytics.nyTot.toLocaleString('sv-SE')} />
-        <KPI label="Ny — VFS Finansierade"  value={vwAnalytics.nyVfsC.toLocaleString('sv-SE')} sub={f1(pct(vwAnalytics.nyVfsC, vwAnalytics.nyTot)) + ' finansgrad'} />
-        <KPI label="Ny — VFS Mål"           value={f1(vwAnalytics.avgNyVfsMal)} />
-        <KPI label="Ny — Op.leasing"        value={vwAnalytics.nyOpkC.toLocaleString('sv-SE')} sub={f1(pct(vwAnalytics.nyOpkC, vwAnalytics.nyTot)) + ' grad'} />
-        <KPI label="Ny — Op.leasing Mål"    value={f1(vwAnalytics.avgNyOpkMal)} />
-        <KPI label="Beg — Levererade"       value={vwAnalytics.begTot.toLocaleString('sv-SE')} />
-        <KPI label="Beg — VFS Finansierade" value={vwAnalytics.begVfsC.toLocaleString('sv-SE')} sub={f1(pct(vwAnalytics.begVfsC, vwAnalytics.begTot)) + ' finansgrad'} />
-        <KPI label="Beg — VFS Mål"          value={f1(vwAnalytics.avgBegVfsMal)} />
+        <KPI label="Levererade" value={begTot.toLocaleString('sv-SE')} />
+        <KPI label="VFS Finanskontrakt" value={begVfsC.toLocaleString('sv-SE')} sub={f1(pct(begVfsC, begTot)) + ' finansgrad'} />
+        <KPI label="VFS Mål" value={f1(avgBegVfsMal)} />
+        <KPI label="Op.leasing" value={begOpkC.toLocaleString('sv-SE')} sub={f1(pct(begOpkC, begTot)) + ' av lev.'} />
+        <KPI label="Op.leasing Mål" value={f1(avgBegOpkMal)} />
+        {hasService && <KPI label="Serviceavtal" value={begSvcC.toLocaleString('sv-SE')} sub={f1(pct(begSvcC, begVfsC)) + ' av VFS'} />}
+        {hasBelopp && <KPI label="Finansierat belopp" value={fmtMkr(begBelopp)} />}
       </div>
 
       {/* ── Charts ── */}
       <div className="chart-row">
+
+        {/* Leveranser vs VFS — antal per region */}
         <div className="chart-box">
           <Bar
             data={{
-              labels,
+              labels: regLabels,
               datasets: [
-                { label: 'Beg VFS+Op.leasing', data: labels.map((r) => getVal('Beg', r, 'vfsGrad') + getVal('Beg', r, 'opkGrad')), backgroundColor: '#4472C4', borderRadius: 4 },
-                { label: 'Mål tot. beg.',       data: labels.map((r) => getVal('Beg', r, 'vfsMal')),  type: 'line', borderColor: '#ED7D31', backgroundColor: 'transparent', pointRadius: 0, borderWidth: 2 },
+                {
+                  label: 'Ny — Levererade',
+                  data: regLabels.map((r) => r === 'Total' ? nyTot : (getByKey('Ny', r).total || 0)),
+                  backgroundColor: '#4472C4', borderRadius: 4,
+                },
+                {
+                  label: 'Ny — VFS Finanskontrakt',
+                  data: regLabels.map((r) => r === 'Total' ? nyVfsC : (getByKey('Ny', r).vfsCount || 0)),
+                  backgroundColor: '#70AD47', borderRadius: 4,
+                },
+                {
+                  label: 'Beg — Levererade',
+                  data: regLabels.map((r) => r === 'Total' ? begTot : (getByKey('Beg', r).total || 0)),
+                  backgroundColor: '#A9C4E8', borderRadius: 4,
+                },
+                {
+                  label: 'Beg — VFS Finanskontrakt',
+                  data: regLabels.map((r) => r === 'Total' ? begVfsC : (getByKey('Beg', r).vfsCount || 0)),
+                  backgroundColor: '#C5E0B4', borderRadius: 4,
+                },
               ],
             }}
-            options={{ responsive: true, maintainAspectRatio: true, plugins: { title: { display: true, text: 'Finansgrad Begagnat (VFS+Op.leasing)', font: { size: 13 } }, legend: { position: 'bottom' } }, scales: { y: tickPct } }}
+            options={{
+              responsive: true,
+              maintainAspectRatio: true,
+              plugins: {
+                title: { display: true, text: 'Leveranser vs VFS Finanskontrakt (antal)', font: { size: 13 } },
+                legend: { position: 'bottom' },
+              },
+              scales: { y: { ticks: { stepSize: 1 } } },
+            }}
           />
         </div>
+
+        {/* Finansgrad % med mål */}
         <div className="chart-box">
           <Bar
             data={{
-              labels,
+              labels: regLabels,
               datasets: [
-                { label: 'Nytt VFS',       data: labels.map((r) => getVal('Ny',  r, 'vfsGrad')), backgroundColor: '#4472C4', borderRadius: 2 },
-                { label: 'Beg VFS',        data: labels.map((r) => getVal('Beg', r, 'vfsGrad')), backgroundColor: '#A9C4E8', borderRadius: 2 },
-                { label: 'Nytt Op.leas.',  data: labels.map((r) => getVal('Ny',  r, 'opkGrad')), backgroundColor: '#70AD47', borderRadius: 2 },
-                { label: 'Beg Op.leas.',   data: labels.map((r) => getVal('Beg', r, 'opkGrad')), backgroundColor: '#C5E0B4', borderRadius: 2 },
-                { label: 'VFS mål ny',     data: labels.map((r) => getVal('Ny',  r, 'vfsMal')),  type: 'line', borderColor: '#ED7D31', backgroundColor: 'transparent', pointRadius: 0, borderWidth: 2 },
-                { label: 'VFS mål beg.',   data: labels.map((r) => getVal('Beg', r, 'vfsMal')),  type: 'line', borderColor: '#FFC000', backgroundColor: 'transparent', pointRadius: 0, borderWidth: 2 },
+                {
+                  label: 'Ny VFS%',
+                  data: regLabels.map((r) => getField('Ny', r, 'vfsGrad')),
+                  backgroundColor: '#4472C4', borderRadius: 2,
+                },
+                {
+                  label: 'Beg VFS%',
+                  data: regLabels.map((r) => getField('Beg', r, 'vfsGrad')),
+                  backgroundColor: '#A9C4E8', borderRadius: 2,
+                },
+                {
+                  label: 'Ny Op.leas%',
+                  data: regLabels.map((r) => getField('Ny', r, 'opkGrad')),
+                  backgroundColor: '#70AD47', borderRadius: 2,
+                },
+                {
+                  label: 'Beg Op.leas%',
+                  data: regLabels.map((r) => getField('Beg', r, 'opkGrad')),
+                  backgroundColor: '#C5E0B4', borderRadius: 2,
+                },
+                {
+                  label: 'VFS mål Ny',
+                  data: regLabels.map((r) => getField('Ny', r, 'vfsMal')),
+                  type: 'line', borderColor: '#ED7D31', backgroundColor: 'transparent',
+                  pointRadius: 4, borderWidth: 2, borderDash: [4, 3],
+                },
+                {
+                  label: 'VFS mål Beg',
+                  data: regLabels.map((r) => getField('Beg', r, 'vfsMal')),
+                  type: 'line', borderColor: '#FFC000', backgroundColor: 'transparent',
+                  pointRadius: 4, borderWidth: 2, borderDash: [4, 3],
+                },
               ],
             }}
-            options={{ responsive: true, maintainAspectRatio: true, plugins: { title: { display: true, text: 'Finansgrad VFS + Op.leasing (Ny / Beg)', font: { size: 13 } }, legend: { position: 'bottom' } }, scales: { y: tickPct } }}
+            options={{
+              responsive: true,
+              maintainAspectRatio: true,
+              plugins: {
+                title: { display: true, text: 'Finansgrad % per region (VFS + Op.leasing)', font: { size: 13 } },
+                legend: { position: 'bottom' },
+              },
+              scales: { y: tickPct },
+            }}
           />
         </div>
       </div>
+
+      {/* ── Op.leasing chart (if data exists) ── */}
+      {(nyOpkC > 0 || begOpkC > 0) && (
+        <div className="chart-row">
+          <div className="chart-box" style={{ maxWidth: 480 }}>
+            <Bar
+              data={{
+                labels: regLabels,
+                datasets: [
+                  {
+                    label: 'Ny Op.leasing',
+                    data: regLabels.map((r) => r === 'Total' ? nyOpkC : (getByKey('Ny', r).opkCount || 0)),
+                    backgroundColor: '#70AD47', borderRadius: 4,
+                  },
+                  {
+                    label: 'Beg Op.leasing',
+                    data: regLabels.map((r) => r === 'Total' ? begOpkC : (getByKey('Beg', r).opkCount || 0)),
+                    backgroundColor: '#C5E0B4', borderRadius: 4,
+                  },
+                  {
+                    label: 'Op.leas mål Ny%',
+                    data: regLabels.map((r) => getField('Ny', r, 'opkMal')),
+                    type: 'line', yAxisID: 'yPct', borderColor: '#ED7D31',
+                    backgroundColor: 'transparent', pointRadius: 4, borderWidth: 2, borderDash: [4, 3],
+                  },
+                ],
+              }}
+              options={{
+                responsive: true,
+                plugins: {
+                  title: { display: true, text: 'Op.leasing — antal + mål%', font: { size: 13 } },
+                  legend: { position: 'bottom' },
+                },
+                scales: {
+                  y:    { position: 'left',  ticks: { stepSize: 1 } },
+                  yPct: { position: 'right', ...tickPct, grid: { drawOnChartArea: false } },
+                },
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* ── Region table ── */}
       <div className="section">
@@ -413,50 +540,61 @@ export default function Finansgrad() {
           <table id="tableVw">
             <thead>
               <tr>
-                <th>Region</th>
-                <th>Ny Lev.</th><th>Ny VFS</th><th>Ny VFS%</th><th>VFS Mål%</th>
-                <th>Ny Op.leas.</th><th>Ny Op%</th><th>Op Mål%</th>
-                <th>Beg Lev.</th><th>Beg VFS</th><th>Beg VFS%</th>
-                <th>Beg Op.leas.</th><th>Beg Op%</th>
+                <th rowSpan={2}>Region</th>
+                <th colSpan={hasBelopp ? 6 : 5} style={{ textAlign: 'center', background: '#dce6f1' }}>Ny</th>
+                <th colSpan={hasBelopp ? 5 : 4} style={{ textAlign: 'center', background: '#e2efda' }}>Begagnat</th>
+              </tr>
+              <tr>
+                <th style={{ background: '#dce6f1' }}>Lev.</th>
+                <th style={{ background: '#dce6f1' }}>VFS</th>
+                <th style={{ background: '#dce6f1' }}>VFS%</th>
+                <th style={{ background: '#dce6f1' }}>Mål%</th>
+                <th style={{ background: '#dce6f1' }}>Op.leas.</th>
+                {hasBelopp && <th style={{ background: '#dce6f1' }}>Belopp</th>}
+                <th style={{ background: '#e2efda' }}>Lev.</th>
+                <th style={{ background: '#e2efda' }}>VFS</th>
+                <th style={{ background: '#e2efda' }}>VFS%</th>
+                <th style={{ background: '#e2efda' }}>Mål%</th>
+                <th style={{ background: '#e2efda' }}>Op.leas.</th>
+                {hasBelopp && <th style={{ background: '#e2efda' }}>Belopp</th>}
               </tr>
             </thead>
             <tbody>
               {regionOrder.map((r) => {
-                const ny  = byKey[`Ny|${r}`]  || {};
-                const beg = byKey[`Beg|${r}`] || {};
+                const ny  = getByKey('Ny',  r);
+                const beg = getByKey('Beg', r);
                 return (
                   <tr key={r}>
                     <td><strong>{r}</strong></td>
                     <td>{ny.total    || 0}</td>
                     <td>{ny.vfsCount || 0}</td>
                     <td>{ny.total ? pct(ny.vfsCount, ny.total).toFixed(1) : '–'}%</td>
-                    <td>{(ny.vfsMal  || 0).toFixed(0)}%</td>
+                    <td>{(ny.vfsMal || 0).toFixed(0)}%</td>
                     <td>{ny.opkCount || 0}</td>
-                    <td>{ny.total ? pct(ny.opkCount, ny.total).toFixed(1) : '–'}%</td>
-                    <td>{(ny.opkMal  || 0).toFixed(0)}%</td>
+                    {hasBelopp && <td>{fmtMkr(ny.belopp || 0)}</td>}
                     <td>{beg.total    || 0}</td>
                     <td>{beg.vfsCount || 0}</td>
                     <td>{beg.total ? pct(beg.vfsCount, beg.total).toFixed(1) : '–'}%</td>
+                    <td>{(beg.vfsMal || 0).toFixed(0)}%</td>
                     <td>{beg.opkCount || 0}</td>
-                    <td>{beg.total ? pct(beg.opkCount, beg.total).toFixed(1) : '–'}%</td>
+                    {hasBelopp && <td>{fmtMkr(beg.belopp || 0)}</td>}
                   </tr>
                 );
               })}
-              {/* Totals row */}
               <tr style={{ fontWeight: 700, borderTop: '2px solid #ddd' }}>
                 <td>Total</td>
-                <td>{vwAnalytics.nyTot}</td>
-                <td>{vwAnalytics.nyVfsC}</td>
-                <td>{pct(vwAnalytics.nyVfsC, vwAnalytics.nyTot).toFixed(1)}%</td>
-                <td>{vwAnalytics.avgNyVfsMal.toFixed(0)}%</td>
-                <td>{vwAnalytics.nyOpkC}</td>
-                <td>{pct(vwAnalytics.nyOpkC, vwAnalytics.nyTot).toFixed(1)}%</td>
-                <td>{vwAnalytics.avgNyOpkMal.toFixed(0)}%</td>
-                <td>{vwAnalytics.begTot}</td>
-                <td>{vwAnalytics.begVfsC}</td>
-                <td>{pct(vwAnalytics.begVfsC, vwAnalytics.begTot).toFixed(1)}%</td>
-                <td>{vwAnalytics.begOpkC}</td>
-                <td>{pct(vwAnalytics.begOpkC, vwAnalytics.begTot).toFixed(1)}%</td>
+                <td>{nyTot}</td>
+                <td>{nyVfsC}</td>
+                <td>{pct(nyVfsC, nyTot).toFixed(1)}%</td>
+                <td>{avgNyVfsMal.toFixed(0)}%</td>
+                <td>{nyOpkC}</td>
+                {hasBelopp && <td>{fmtMkr(nyBelopp)}</td>}
+                <td>{begTot}</td>
+                <td>{begVfsC}</td>
+                <td>{pct(begVfsC, begTot).toFixed(1)}%</td>
+                <td>{avgBegVfsMal.toFixed(0)}%</td>
+                <td>{begOpkC}</td>
+                {hasBelopp && <td>{fmtMkr(begBelopp)}</td>}
               </tr>
             </tbody>
           </table>
@@ -472,26 +610,31 @@ export default function Finansgrad() {
               {rangeLabel(stockPreset, stockFrom, stockTo)}
             </span>
           </h2>
+
           {stockSummary && (
             <div className="kpi-grid" style={{ marginBottom: 16 }}>
-              <KPI label="Kontrakt i perioden"  value={stockSummary.total.toLocaleString()} sub="totalt" />
-              <KPI label="Aktiva kontrakt"       value={stockSummary.active.toLocaleString()} />
-              <KPI label="Nya fordon"            value={stockSummary.ny.toLocaleString()} sub="Begagnat = Nej" />
-              <KPI label="Begagnade fordon"      value={stockSummary.beg.toLocaleString()} sub="Begagnat = Ja" />
-              <KPI label="Finansierat belopp"    value={(stockSummary.totalFin / 1e6).toFixed(1) + ' Mkr'} />
+              <KPI label="Kontrakt i perioden"  value={stockSummary.total.toLocaleString('sv-SE')} sub="totalt" />
+              <KPI label="Aktiva kontrakt"       value={stockSummary.active.toLocaleString('sv-SE')} />
+              <KPI label="Nya fordon"            value={stockSummary.ny.toLocaleString('sv-SE')} sub="Begagnat = Nej" />
+              <KPI label="Begagnade fordon"      value={stockSummary.beg.toLocaleString('sv-SE')} sub="Begagnat = Ja" />
+              <KPI label="Finansierat belopp"    value={fmtMkr(stockSummary.totalFin)} />
             </div>
           )}
+
           <div className="chart-row">
-            <div className="chart-box" style={{ maxWidth: 420 }}>
+            <div className="chart-box" style={{ maxWidth: 400 }}>
               <Doughnut
                 data={{
-                  labels: stockFinansbolag.map(([name]) => name),
-                  datasets: [{ data: stockFinansbolag.map(([, c]) => c), backgroundColor: DOUGHNUT_COLORS, borderWidth: 1 }],
+                  labels: stockFinansbolag.map((d) => d.name),
+                  datasets: [{
+                    data: stockFinansbolag.map((d) => d.count),
+                    backgroundColor: COLORS, borderWidth: 1,
+                  }],
                 }}
                 options={{
                   responsive: true,
                   plugins: {
-                    title: { display: true, text: 'Alla kontrakt per finansbolag', font: { size: 13 } },
+                    title: { display: true, text: 'Kontrakt per finansbolag', font: { size: 13 } },
                     legend: { position: 'right' },
                     tooltip: { callbacks: { label: (ctx) => {
                       const tot = ctx.dataset.data.reduce((a, b) => a + b, 0);
@@ -501,13 +644,14 @@ export default function Finansgrad() {
                 }}
               />
             </div>
+
             <div className="chart-box">
               <Bar
                 data={{
-                  labels: stockFinansbolag.map(([name]) => name),
+                  labels: stockFinansbolag.map((d) => d.name),
                   datasets: [
-                    { label: 'Nya fordon',      data: stockFinansbolag.map(([name]) => stockFinansbolagNyBeg?.ny[name]  || 0), backgroundColor: '#4472C4', borderRadius: 4 },
-                    { label: 'Begagnade fordon', data: stockFinansbolag.map(([name]) => stockFinansbolagNyBeg?.beg[name] || 0), backgroundColor: '#A9C4E8', borderRadius: 4 },
+                    { label: 'Nya fordon',       data: stockFinansbolag.map((d) => d.ny),  backgroundColor: '#4472C4', borderRadius: 4 },
+                    { label: 'Begagnade fordon', data: stockFinansbolag.map((d) => d.beg), backgroundColor: '#A9C4E8', borderRadius: 4 },
                   ],
                 }}
                 options={{
@@ -518,6 +662,36 @@ export default function Finansgrad() {
               />
             </div>
           </div>
+
+          {/* Finansierat belopp per bolag */}
+          {stockFinansbolag.some((d) => d.belopp > 0) && (
+            <div className="chart-row" style={{ marginTop: 12 }}>
+              <div className="chart-box">
+                <Bar
+                  data={{
+                    labels: stockFinansbolag.map((d) => d.name),
+                    datasets: [{
+                      label: 'Finansierat belopp (Mkr)',
+                      data: stockFinansbolag.map((d) => +(d.belopp / 1e6).toFixed(2)),
+                      backgroundColor: COLORS.slice(0, stockFinansbolag.length),
+                      borderRadius: 4,
+                    }],
+                  }}
+                  options={{
+                    responsive: true,
+                    plugins: {
+                      title: { display: true, text: 'Finansierat belopp per finansbolag (Mkr)', font: { size: 13 } },
+                      legend: { display: false },
+                      tooltip: { callbacks: { label: (ctx) => ` ${ctx.raw} Mkr` } },
+                    },
+                    scales: { y: { ticks: { callback: (v) => v + ' Mkr' } } },
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Table per finansbolag */}
           <div className="table-scroll" style={{ marginTop: 16 }}>
             <table>
               <thead>
@@ -527,18 +701,20 @@ export default function Finansgrad() {
                   <th style={{ textAlign: 'right' }}>Andel</th>
                   <th style={{ textAlign: 'right' }}>Nya</th>
                   <th style={{ textAlign: 'right' }}>Begagnade</th>
+                  <th style={{ textAlign: 'right' }}>Finansierat belopp</th>
                 </tr>
               </thead>
               <tbody>
                 {(() => {
-                  const grandTotal = stockFinansbolag.reduce((s, [, c]) => s + c, 0);
-                  return stockFinansbolag.map(([name, count]) => (
-                    <tr key={name}>
-                      <td><strong>{name}</strong></td>
-                      <td style={{ textAlign: 'right' }}>{count}</td>
-                      <td style={{ textAlign: 'right' }}>{((count / grandTotal) * 100).toFixed(1)}%</td>
-                      <td style={{ textAlign: 'right' }}>{stockFinansbolagNyBeg?.ny[name]  || 0}</td>
-                      <td style={{ textAlign: 'right' }}>{stockFinansbolagNyBeg?.beg[name] || 0}</td>
+                  const grandTotal = stockFinansbolag.reduce((s, d) => s + d.count, 0);
+                  return stockFinansbolag.map((d) => (
+                    <tr key={d.name}>
+                      <td><strong>{d.name}</strong></td>
+                      <td style={{ textAlign: 'right' }}>{d.count}</td>
+                      <td style={{ textAlign: 'right' }}>{((d.count / grandTotal) * 100).toFixed(1)}%</td>
+                      <td style={{ textAlign: 'right' }}>{d.ny}</td>
+                      <td style={{ textAlign: 'right' }}>{d.beg}</td>
+                      <td style={{ textAlign: 'right' }}>{d.belopp > 0 ? fmtMkr(d.belopp) : '—'}</td>
                     </tr>
                   ));
                 })()}

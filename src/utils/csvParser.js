@@ -57,11 +57,8 @@ export function parseVWCSV(file) {
 }
 
 // ── Excel parser for "ÅF Utfall mot mål" (.xlsx) ─────────────────────────────
-// Returns { period, goals, leveranser, finanskontrakt } using detail sheets.
-//
-// Leveranser sheet   – col 3: region, col 14: Ny/Beg, col 15: Leveransdatum (Date)
-// Finanskontrakt sheet – col 3: region, col 8: Startdatum (Date), col 10: OP/FI, col 14: Ny/Beg
-// Goals come from "Utfall mot mål": vfsMal/opkMal per region × nybeg
+// Returns { period, goals, leveranser, finanskontrakt }
+// Columns are detected dynamically from the header row, with hardcoded fallbacks.
 export function parseVWExcel(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -70,14 +67,47 @@ export function parseVWExcel(file) {
         const data = new Uint8Array(evt.target.result);
         const wb = XLSX.read(data, { type: 'array', cellDates: true });
 
+        // ── Helpers ─────────────────────────────────────────────────────────
+        // Find first row index whose cells contain ALL of the given keywords
+        const findHeaderRow = (rows, keywords, fallback = 4) => {
+          for (let i = 0; i < Math.min(rows.length, 15); i++) {
+            const text = rows[i].map((c) => String(c || '').toLowerCase()).join(' ');
+            if (keywords.every((kw) => text.includes(kw.toLowerCase()))) return i;
+          }
+          return fallback;
+        };
+
+        // Find column index by partial name match (case-insensitive); returns -1 if not found
+        const findCol = (headers, ...terms) => {
+          for (let i = 0; i < headers.length; i++) {
+            const h = String(headers[i] || '').toLowerCase().replace(/\s+/g, ' ').trim();
+            if (terms.some((t) => h.includes(t.toLowerCase()))) return i;
+          }
+          return -1;
+        };
+
+        const col = (idx, fallback) => (idx >= 0 ? idx : fallback);
+
+        // Parse a numeric cell (handles Swedish decimal comma and whitespace)
+        const parseNum = (val) => {
+          if (val === null || val === undefined || val === '') return 0;
+          const n = parseFloat(String(val).replace(/\s/g, '').replace(',', '.'));
+          return isNaN(n) ? 0 : n;
+        };
+
         // ── 1. Period label + goals from "Utfall mot mål" ──────────────────
-        const ovName = wb.SheetNames.find((n) => n.toLowerCase().includes('utfall')) || wb.SheetNames[0];
+        const ovName =
+          wb.SheetNames.find((n) => n.toLowerCase().includes('utfall')) || wb.SheetNames[0];
         const ovRows = XLSX.utils.sheet_to_json(wb.Sheets[ovName], { header: 1, defval: '' });
 
         let period = 'Okänd period';
-        const desc = String(ovRows[1]?.[0] || '');
-        const pm = desc.match(/Period från:\s*(\d+)\s+Period till:\s*(\d+)/);
-        if (pm) period = `${pm[1]} – ${pm[2]}`;
+        for (let i = 0; i < Math.min(ovRows.length, 5); i++) {
+          const text = ovRows[i].map((c) => String(c || '')).join(' ');
+          const pm = text.match(/Period från:\s*(\d+)\s+Period till:\s*(\d+)/);
+          if (pm) { period = `${pm[1]} – ${pm[2]}`; break; }
+          const pm2 = text.match(/(\d{6})\s*[-–]\s*(\d{6})/);
+          if (pm2) { period = `${pm2[1]} – ${pm2[2]}`; break; }
+        }
 
         const goals = {};
         let currentNybeg = null;
@@ -97,38 +127,61 @@ export function parseVWExcel(file) {
         }
 
         // ── 2. Leveranser (individual deliveries) ──────────────────────────
-        // Headers row 4 (index 4), data from row 5 (index 5)
         const levSheet = wb.Sheets['Leveranser'];
         const levRows = levSheet
           ? XLSX.utils.sheet_to_json(levSheet, { header: 1, defval: '', cellDates: true })
           : [];
+
+        const levHeaderIdx = findHeaderRow(levRows, ['leveransdatum']);
+        const levH = levRows[levHeaderIdx] || [];
+        const LC = {
+          id:     col(findCol(levH, 'åf-nummer', 'åf nummer', 'af nummer'), 1),
+          region: col(findCol(levH, 'region'), 3),
+          nybeg:  col(findCol(levH, 'ny/beg', 'nybeg'), 14),
+          datum:  col(findCol(levH, 'leveransdatum'), 15),
+        };
+
         const leveranser = [];
-        for (let i = 5; i < levRows.length; i++) {
+        for (let i = levHeaderIdx + 1; i < levRows.length; i++) {
           const row = levRows[i];
-          if (!row[1]) continue;                      // ÅF nummer empty → skip
-          const region = String(row[3] || '').trim();
-          const nybeg  = String(row[14] || '').trim();
-          const datum  = row[15];                     // Leveransdatum (Date)
+          if (!row[LC.id]) continue;
+          const region = String(row[LC.region] || '').trim();
+          const nybeg  = String(row[LC.nybeg]  || '').trim();
+          const datum  = row[LC.datum];
           if (!region || !(datum instanceof Date)) continue;
           leveranser.push({ region, nybeg, datum });
         }
 
         // ── 3. Finanskontrakt (individual finance contracts) ───────────────
-        // Headers row 4, data from row 5
         const finSheet = wb.Sheets['Finanskontrakt'];
         const finRows = finSheet
           ? XLSX.utils.sheet_to_json(finSheet, { header: 1, defval: '', cellDates: true })
           : [];
+
+        const finHeaderIdx = findHeaderRow(finRows, ['startdatum']);
+        const finH = finRows[finHeaderIdx] || [];
+        const FC = {
+          id:      col(findCol(finH, 'åf-nummer', 'åf nummer', 'af nummer'), 1),
+          region:  col(findCol(finH, 'region'), 3),
+          datum:   col(findCol(finH, 'startdatum'), 8),
+          opFi:    col(findCol(finH, 'op/fi', 'kontraktstyp', 'produkttyp'), 10),
+          nybeg:   col(findCol(finH, 'ny/beg', 'nybeg'), 14),
+          belopp:  findCol(finH, 'finansierat belopp', 'kreditbelopp', 'belopp'),
+          service: findCol(finH, 'serviceavtal', 'servicekontrakt', 'service'),
+        };
+
         const finanskontrakt = [];
-        for (let i = 5; i < finRows.length; i++) {
+        for (let i = finHeaderIdx + 1; i < finRows.length; i++) {
           const row = finRows[i];
-          if (!row[1]) continue;
-          const region = String(row[3]  || '').trim();
-          const datum  = row[8];                      // Startdatum (Date)
-          const opFi   = String(row[10] || '').trim(); // 'OP' | 'Lån' | 'FI' | …
-          const nybeg  = String(row[14] || '').trim();
+          if (!row[FC.id]) continue;
+          const region  = String(row[FC.region] || '').trim();
+          const datum   = row[FC.datum];
+          const opFi    = String(row[FC.opFi]   || '').trim().toUpperCase();
+          const nybeg   = String(row[FC.nybeg]  || '').trim();
+          const belopp  = FC.belopp  >= 0 ? parseNum(row[FC.belopp])  : 0;
+          const service = FC.service >= 0 ? String(row[FC.service] || '').trim() : '';
           if (!region || !(datum instanceof Date)) continue;
-          finanskontrakt.push({ region, nybeg, datum, opFi });
+          finanskontrakt.push({ region, nybeg, datum, opFi, belopp, service });
         }
 
         resolve({ period, goals, leveranser, finanskontrakt });
