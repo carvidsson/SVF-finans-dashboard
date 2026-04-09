@@ -288,6 +288,22 @@ export default function Finansgrad() {
       .map(([name, v]) => ({ name, ...v }));
   }, [filteredStock]);
 
+  // ── Per-finansbolag Ny/Beg breakdown for charts ──────────────────────────
+  // Used to overlay CSV company bars onto the VW region charts (Total column only)
+  const stockByCompanyNyBeg = useMemo(() => {
+    if (!filteredStock.length) return [];
+    const byCompany = {};
+    filteredStock.forEach((r) => {
+      const name = r['Leverantörsnamn'] || 'Okänt';
+      if (!byCompany[name]) byCompany[name] = { ny: 0, beg: 0 };
+      if (r['Begagnat'] === 'No') byCompany[name].ny++;
+      else byCompany[name].beg++;
+    });
+    return Object.entries(byCompany)
+      .sort((a, b) => (b[1].ny + b[1].beg) - (a[1].ny + a[1].beg))
+      .map(([name, v]) => ({ name, ...v, total: v.ny + v.beg }));
+  }, [filteredStock]);
+
   // ── Stock summary ────────────────────────────────────────────────────────
   const stockSummary = useMemo(() => {
     if (!filteredStock.length) return null;
@@ -324,6 +340,12 @@ export default function Finansgrad() {
 
   const tickPct = { ticks: { callback: (v) => v.toFixed(0) + '%' } };
   const regLabels = [...regionOrder, 'Total'];
+
+  // Colours for CSV company bars — offset from the VW palette to avoid clashes
+  const CSV_COLORS = ['#ED7D31','#FFC000','#9E480E','#997300','#636363','#FF7F7F'];
+
+  // Helpers: CSV dataset value — only non-null at 'Total', null elsewhere (no regional breakdown)
+  const csvNullExceptTotal = (val) => regLabels.map((r) => (r === 'Total' ? val : null));
   const getByKey  = (nb, r) => byKey[`${nb}|${r}`] || {};
   const getTotal  = (nb) => nb === 'Ny'
     ? { total: nyTot, vfsCount: nyVfsC, opkCount: nyOpkC, vfsMal: avgNyVfsMal, opkMal: avgNyOpkMal }
@@ -450,11 +472,20 @@ export default function Finansgrad() {
                 { label: 'Ny — VFS Finanskontrakt', data: regLabels.map((r) => r === 'Total' ? nyVfsC : (getByKey('Ny',  r).vfsCount || 0)), backgroundColor: '#70AD47', borderRadius: 4 },
                 { label: 'Beg — Levererade',        data: regLabels.map((r) => r === 'Total' ? begTot  : (getByKey('Beg', r).total    || 0)), backgroundColor: '#A9C4E8', borderRadius: 4 },
                 { label: 'Beg — VFS Finanskontrakt',data: regLabels.map((r) => r === 'Total' ? begVfsC : (getByKey('Beg', r).vfsCount || 0)), backgroundColor: '#C5E0B4', borderRadius: 4 },
+                // CSV companies — only show in Total column
+                ...stockByCompanyNyBeg.flatMap((d, i) => [
+                  { label: `${d.name} — Ny`,  data: csvNullExceptTotal(d.ny),  backgroundColor: CSV_COLORS[i % CSV_COLORS.length], borderRadius: 4, borderWidth: 1, borderColor: '#fff' },
+                  { label: `${d.name} — Beg`, data: csvNullExceptTotal(d.beg), backgroundColor: CSV_COLORS[i % CSV_COLORS.length] + '99', borderRadius: 4, borderWidth: 1, borderColor: '#fff' },
+                ]),
               ],
             }}
             options={{
               responsive: true,
-              plugins: { title: { display: true, text: 'Leveranser vs VFS Finanskontrakt (antal)', font: { size: 13 } }, legend: { position: 'bottom' } },
+              plugins: {
+                title: { display: true, text: 'Leveranser vs Finanskontrakt (antal) — VFS per region, övriga i Total', font: { size: 13 } },
+                legend: { position: 'bottom' },
+                tooltip: { callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${ctx.raw ?? '—'}` } },
+              },
               scales: { y: { ticks: { stepSize: 1 } } },
             }}
           />
@@ -468,13 +499,22 @@ export default function Finansgrad() {
                 { label: 'Beg VFS%',   data: regLabels.map((r) => getField('Beg', r, 'vfsGrad')), backgroundColor: '#A9C4E8', borderRadius: 2 },
                 { label: 'Ny Op.leas%',data: regLabels.map((r) => getField('Ny',  r, 'opkGrad')), backgroundColor: '#70AD47', borderRadius: 2 },
                 { label: 'Beg Op.leas%',data:regLabels.map((r) => getField('Beg', r, 'opkGrad')), backgroundColor: '#C5E0B4', borderRadius: 2 },
+                // CSV companies — finansgrad% vs VW leveranser (only Total column)
+                ...stockByCompanyNyBeg.flatMap((d, i) => [
+                  { label: `${d.name} Ny%`,  data: csvNullExceptTotal(pct(d.ny,  nyTot)),  backgroundColor: CSV_COLORS[i % CSV_COLORS.length], borderRadius: 2, borderWidth: 1, borderColor: '#fff' },
+                  { label: `${d.name} Beg%`, data: csvNullExceptTotal(pct(d.beg, begTot)), backgroundColor: CSV_COLORS[i % CSV_COLORS.length] + '99', borderRadius: 2, borderWidth: 1, borderColor: '#fff' },
+                ]),
                 { label: 'VFS mål Ny', data: regLabels.map((r) => getField('Ny',  r, 'vfsMal')),  type: 'line', borderColor: '#ED7D31', backgroundColor: 'transparent', pointRadius: 4, borderWidth: 2, borderDash: [4,3] },
                 { label: 'VFS mål Beg',data: regLabels.map((r) => getField('Beg', r, 'vfsMal')),  type: 'line', borderColor: '#FFC000', backgroundColor: 'transparent', pointRadius: 4, borderWidth: 2, borderDash: [4,3] },
               ],
             }}
             options={{
               responsive: true,
-              plugins: { title: { display: true, text: 'Finansgrad % per region (VFS + Op.leasing)', font: { size: 13 } }, legend: { position: 'bottom' } },
+              plugins: {
+                title: { display: true, text: 'Finansgrad % per region — VFS per region, övriga i Total', font: { size: 13 } },
+                legend: { position: 'bottom' },
+                tooltip: { callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${ctx.raw != null ? ctx.raw.toFixed(1) + '%' : '—'}` } },
+              },
               scales: { y: tickPct },
             }}
           />
